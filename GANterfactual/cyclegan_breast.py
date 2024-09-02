@@ -1,26 +1,24 @@
-from __future__ import print_function, division
-
 import datetime
 import os
 
 import keras
 import matplotlib.pyplot as plt
 import numpy as np
+import tensorflow
 
 from skimage.transform import resize
-
-from keras.layers import Input, Dropout, Concatenate
-from keras.models import Model
+from tensorflow.keras.layers import Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.preprocessing import image
 from keras.optimizers import Adam
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
+from tensorflow_addons.layers import InstanceNormalization
 
-
+from GANterfactual.preprocessor import preprocess_inbreast_for_ganterfactual
 from classifier import load_classifier
-from dataloader import DataLoader
 from discriminator import build_discriminator
 from generator import build_generator
 
-class CycleGAN():
+class CycleGAN:
 
     def __init__(self):
         # Input shape
@@ -59,6 +57,27 @@ class CycleGAN():
 
         self.build_combined(classifier_path, classifier_weight)
 
+    def load_pretrained(self, cyclegan_pretrained_folder, classifier_path=None, classifier_weight=None):
+        custom_objects = {"InstanceNormalization": InstanceNormalization}
+
+        # Load discriminators from disk
+        self.d_N = keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'discriminator_pretrained.h5'),
+                                           custom_objects=custom_objects, compile=False)
+        self.d_N._name = "d_N"
+        self.d_P = keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'discriminator_pretrained.h5'),
+                                           custom_objects=custom_objects, compile=False)
+        self.d_P._name = "d_P"
+
+        # Load generators from disk
+        self.g_NP = keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'generator_pretrained.h5'),
+                                            custom_objects=custom_objects, compile=False)
+        self.g_NP._name = "g_NP"
+        self.g_PN = keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'generator_pretrained.h5'),
+                                            custom_objects=custom_objects, compile=False)
+        self.g_PN._name = "g_PN"
+
+        self.build_combined(classifier_path, classifier_weight)
+
     def load_existing(self, cyclegan_folder, classifier_path=None, classifier_weight=None):
         custom_objects = {"InstanceNormalization": InstanceNormalization}
 
@@ -84,12 +103,12 @@ class CycleGAN():
         os.makedirs(cyclegan_folder, exist_ok=True)
 
         # Save discriminators to disk
-        self.d_N.save(os.path.join(cyclegan_folder, 'discriminator_n.h5'))
-        self.d_P.save(os.path.join(cyclegan_folder, 'discriminator_p.h5'))
+        self.d_N.save(os.path.join(cyclegan_folder, 'discriminator_n.tf'))
+        self.d_P.save(os.path.join(cyclegan_folder, 'discriminator_p.tf'))
 
         # Save generators to disk
-        self.g_NP.save(os.path.join(cyclegan_folder, 'generator_np.h5'))
-        self.g_PN.save(os.path.join(cyclegan_folder, 'generator_pn.h5'))
+        self.g_NP.save(os.path.join(cyclegan_folder, 'generator_np.tf'))
+        self.g_PN.save(os.path.join(cyclegan_folder, 'generator_pn.tf'))
 
     def build_combined(self, classifier_path=None, classifier_weight=None):
         optimizer = Adam(0.0002, 0.5)
@@ -163,12 +182,10 @@ class CycleGAN():
                                                 self.lambda_id, self.lambda_id],
                                   optimizer=optimizer)
 
-    def train(self, dataset_name, epochs, batch_size=1, train_N="NEGATIVE", train_P="POSITIVE", print_interval=100,
+    def train(self, dataset, epochs, batch_size=1, print_interval=100,
               sample_interval=1000):
 
-        # Configure data loader
-        data_loader = DataLoader(dataset_name=dataset_name, img_res=(self.img_rows, self.img_cols))
-
+        dataset = dataset.batch(batch_size)
         start_time = datetime.datetime.now()
 
         # Adversarial loss ground truths
@@ -179,7 +196,7 @@ class CycleGAN():
         class_P = np.stack([np.zeros(batch_size), np.ones(batch_size)]).T
 
         for epoch in range(epochs):
-            for batch_i, (imgs_N, imgs_P) in enumerate(data_loader.load_batch(train_N, train_P, batch_size)):
+            for batch_i, (imgs_N, imgs_P) in enumerate(dataset):
                 # ----------------------
                 #  Train Discriminators
                 # ----------------------
@@ -255,13 +272,11 @@ class CycleGAN():
         reconstr_P = self.g_NP.predict(fake_N)
 
         imgs = [img_N, fake_P, reconstr_N, img_P, fake_N, reconstr_P]
-        classification = [['NEGATIVE', 'POSITIVE'][int(np.argmax(self.classifier.predict(x)))] for x in imgs]
+        classification = [['benign', 'malignant'][int(np.argmax(self.classifier.predict(x)))] for x in imgs]
 
         gen_imgs = np.concatenate(imgs)
-        correct_classification = ['NEGATIVE', 'POSITIVE', 'NEGATIVE', 'POSITIVE', 'NEGATIVE', 'POSITIVE']
+        correct_classification = ['benign', 'malignant', 'benign', 'malignant', 'benign', 'malignant']
 
-        # Rescale images 0 - 1
-        gen_imgs = 0.5 * gen_imgs + 0.5
 
         titles = ['Original', 'Translated', 'Reconstructed']
         fig, axs = plt.subplots(r, c, figsize=(15, 10))
@@ -297,7 +312,7 @@ class CycleGAN():
         pred_reconstructed = self.classifier.predict(reconstructed)
 
         if force_original_aspect_ratio:
-            orig_no_res = keras.preprocessing.image.load_img(original_in_path)
+            orig_no_res = image.load_img(original_in_path)
             translated = resize(translated[0], (orig_no_res.height, orig_no_res.width))
             reconstructed = resize(reconstructed[0], (orig_no_res.height, orig_no_res.width))
         else:
@@ -310,9 +325,15 @@ class CycleGAN():
         return [pred_original, pred_translated, pred_reconstructed]
 
 
+
+
 if __name__ == '__main__':
+    dataset = preprocess_inbreast_for_ganterfactual('trainval')
     gan = CycleGAN()
-    gan.construct(classifier_path=os.path.join('..', 'models', 'classifier', 'model.h5'), classifier_weight=1)
-    gan.train(dataset_name=os.path.join("..","data"), epochs=20, batch_size=1, print_interval=10,
+    classifier_path = os.path.join('..', 'models', 'classifier_final', 'model.h5')
+    pretrained_folder = os.path.join('..', 'models', 'GAN', 'ep_999')
+    gan.load_pretrained(pretrained_folder, classifier_path=classifier_path, classifier_weight=1)
+    gan.train(dataset=dataset, epochs=20, batch_size=1, print_interval=10,
           sample_interval=100)
     gan.save(os.path.join('..', 'models', 'GANterfactual'))
+

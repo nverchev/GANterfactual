@@ -1,9 +1,9 @@
-from keras.layers import Dropout
-from keras.layers import Input, Concatenate
-from keras.layers.advanced_activations import LeakyReLU
-from keras.layers.convolutional import UpSampling2D, Conv2D
-from keras.models import Model
-from keras_contrib.layers.normalization.instancenormalization import InstanceNormalization
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers  import Input, Concatenate
+from tensorflow.keras.layers  import LeakyReLU
+from tensorflow.keras.layers  import UpSampling2D, Conv2D
+from tensorflow.keras  import Model
+from tensorflow_addons.layers import InstanceNormalization
 
 
 def build_generator(img_shape, gf, channels):
