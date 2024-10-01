@@ -1,5 +1,7 @@
 import typing
 import random
+import warnings
+import io
 import numpy as np
 import tensorflow
 import pydicom
@@ -11,15 +13,18 @@ import pathlib
 import xml.etree.ElementTree as ET
 import cv2
 from tensorflow.python.framework import dtypes
+from tensorflow.python.ops.numpy_ops import array
 
 
 def parse_args() -> argparse.Namespace:
     try:
-        data_path = os.getenv('DATASET_PATH')
+        inbreast_path = os.getenv('INBREAST_PATH')
+        vindr_path = os.getenv('VINDR_PATH')
     except TypeError:
         raise FileNotFoundError('File .env does not exists or it does not contain the path')
     ap = argparse.ArgumentParser()
-    ap.add_argument('-i', '--in', default=data_path, help='input folder')
+    ap.add_argument('-inbreast', '--inbreast', default=inbreast_path, help='input folder')
+    ap.add_argument('-vindr', '--vindr', default=vindr_path, help='input folder')
     #ap.add_argument('-o', '--out', required=True, help='output folder')
     ap.add_argument('-t', '--test',  default=20, help='proportion of images used for test')
     ap.add_argument('-v', '--validation', default=10, help='proportion of images used for validation')
@@ -43,7 +48,15 @@ def shuffled_patients_paths(dicom_paths):
     return shuffled_dictionary
 
 
-
+def window_image(array, window_size=500):
+    flatten = array.flatten()
+    non_zero_data = flatten[flatten != 0]
+    median = np.percentile(non_zero_data, [50])
+    new_min = median - window_size
+    new_max = median + window_size
+    array = np.clip(array, a_min=new_min, a_max=new_max) * (array > 0)
+    array /= new_max
+    return array
 
 def create_mask_from_polygon(image_shape, polygon_coords):
     """
@@ -110,8 +123,10 @@ def extract_muscle_rois(xml_path: pathlib.Path) -> list[np.ndarray]:
 
 
 
-def read_image(dcm_path: pathlib.Path) -> np.ndarray:
-    image = pydicom.dcmread(dcm_path).pixel_array / 4095
+def read_image(dcm_path: pathlib.Path, window_size=500) -> np.ndarray:
+    image = pydicom.dcmread(dcm_path).pixel_array
+    # Normalize the image
+    image = window_image(image, window_size=700)
     return image
 
 class ImageAndMuscle(typing.NamedTuple):
@@ -128,35 +143,39 @@ def extract_muscle_mask(image: np.ndarray, muscle_path: pathlib.Path) -> typing.
     else:
         return None
 
-def extract_squares(image: np.ndarray, xml_path: pathlib.Path, size=512) -> list[np.ndarray]:
+def extract_square_from_center(image: np.ndarray, center: tuple[int, int], size=512):
     # Image dimensions
     height, width = image.shape[:2]
 
     # Half size for easy calculations
     half_size = size // 2
 
+    x_center, y_center = center
+    left = max(0, x_center - half_size)
+    right = min(width, x_center + half_size)
+    top = max(0, y_center - half_size)
+    bottom = min(height, y_center + half_size)
+    # Adjust boundaries if the square goes out of the image bounds
+    if left == 0:
+        right = size
+    elif right == width:
+        left = width - size
+    if top == 0:
+        bottom = size
+    elif bottom == height:
+        top = height - size
+
+    return image[top:bottom, left:right]
+
+
+def extract_squares_inbreast(image: np.ndarray, xml_path: pathlib.Path, size=512) -> list[np.ndarray]:
+
     if xml_path.exists():
         rois = extract_rois(xml_path)
         squares = []
         for roi in rois:
             center = np.mean(roi, axis=0).astype(np.int32)
-            # Initial boundaries based on the point being at the center
-            x_center, y_center = center
-            left = max(0, x_center - half_size)
-            right = min(width, x_center + half_size)
-            top = max(0, y_center - half_size)
-            bottom = min(height, y_center + half_size)
-            # Adjust boundaries if the square goes out of the image bounds
-            if left == 0:
-                right = size
-            elif right == width:
-                left = width - size
-            if top == 0:
-                bottom = size
-            elif bottom == height:
-                top = height - size
-
-            squares.append(image[top:bottom, left:right])
+            squares.append(extract_square_from_center(image, center, size))
         return squares
     else:
         return []
@@ -191,24 +210,34 @@ def random_square_crop(data_point: ImageAndMuscle,
     muscle_mask = data_point.muscle_mask
     height, width = image.shape[:2]
     total_pixels = square_size ** 2
-    while True:
+    left_side = np.count_nonzero(image[:, :width  // 2]) > np.count_nonzero(image[:, width  // 2:])
+
+    for attempt in range(100):
         # Randomly select top-left corner for the square crop
-        y = np.random.randint(0, height - square_size)
-        x = np.random.randint(0, width - square_size)
+        if left_side:
+            y = np.random.randint(0, width  // 2)
+        else:
+            y = np.random.randint(width // 2 - square_size, width - square_size)
+        x = np.random.randint(square_size, height - 2 * square_size)
 
         # Remove muscle:
         image_no_muscle = (1 - muscle_mask) * image if muscle_mask is not None else image
 
         # Crop the square
-        square = image_no_muscle[y:y + square_size, x:x + square_size]
+        square = image_no_muscle[x:x + square_size, y:y + square_size]
 
         # Calculate the ratio of non-black pixels
         non_black_pixels = np.count_nonzero(square)
 
         if non_black_pixels > (1 - max_black_pixel_ratio) * total_pixels:
-            square = image[y:y + square_size, x:x + square_size]
+            square = image[x:x + square_size, y:y + square_size]
             return np.expand_dims(square, axis=-1),
-
+    x_up = height // 2 - square_size // 2
+    if left_side:
+        square = image[x_up:x_up + square_size, :square_size]
+    else:
+        square = image[x_up:x_up + square_size, width - square_size:]
+    return np.expand_dims(square, axis=-1),
 
 
 
@@ -226,7 +255,7 @@ def preprocess_inbreast_for_pretraining(split='trainval') -> tensorflow.data.Dat
     dotenv.load_dotenv()
 
     args = vars(parse_args())
-    in_path = pathlib.Path(args['in'])
+    in_path = pathlib.Path(args['inbreast'])
     test_size = float(args['test'])
     val_size = float(args['validation'])
     dim = int(args['dimension'])
@@ -275,7 +304,7 @@ def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Data
     dotenv.load_dotenv()
 
     args = vars(parse_args())
-    in_path = pathlib.Path(args['in'])
+    in_path = pathlib.Path(args['inbreast'])
     test_size = float(args['test'])
     val_size = float(args['validation'])
     dim = int(args['dimension'])
@@ -298,9 +327,11 @@ def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Data
         indices = slice(0, test_split)
     elif split == 'val':
         indices = slice(val_split, test_split)
-    else:
-        assert split == 'test'
+    elif split == 'test':
         indices = slice(test_split, None)
+    else:
+        assert split == 'all'
+        indices = slice(None, None)
 
     dataset: list[tuple[np.ndarray, bool]] = []
     for patient in list(patient_paths)[indices]:
@@ -310,7 +341,7 @@ def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Data
             malignant = xls_sheet[xls_sheet['File Name'] == id_str]['malignant']
             label = tensorflow.keras.utils.to_categorical(malignant, num_classes=2)[0]
             image = read_image(image_file)
-            for roi in extract_squares(image, xml_file):
+            for roi in extract_squares_inbreast(image, xml_file):
                 dataset.append((np.expand_dims(roi, -1), label))
 
     tf_dataset =  tensorflow.data.Dataset.from_generator(lambda: ShuffledDataset(dataset),
@@ -325,7 +356,7 @@ def preprocess_inbreast_for_ganterfactual(split='trainval') -> tensorflow.data.D
     dotenv.load_dotenv()
 
     args = vars(parse_args())
-    in_path = pathlib.Path(args['in'])
+    in_path = pathlib.Path(args['inbreast'])
     test_size = float(args['test'])
     val_size = float(args['validation'])
     dim = int(args['dimension'])
@@ -347,9 +378,11 @@ def preprocess_inbreast_for_ganterfactual(split='trainval') -> tensorflow.data.D
         indices = slice(0, test_split)
     elif split == 'val':
         indices = slice(val_split, test_split)
-    else:
-        assert split == 'test'
+    elif split == 'test':
         indices = slice(test_split, None)
+    else:
+        assert split == 'all'
+        indices = slice(None, None)
 
     dataset_malignant: list[np.ndarray] = []
     dataset_benign: list[np.ndarray] = []
@@ -361,7 +394,7 @@ def preprocess_inbreast_for_ganterfactual(split='trainval') -> tensorflow.data.D
             xml_file = (xml_path / id_str).with_suffix('.xml')
             malignant = xls_sheet[xls_sheet['File Name'] == id_str]['malignant']
             image = read_image(image_file)
-            for roi in extract_squares(image, xml_file):
+            for roi in extract_squares_inbreast(image, xml_file):
                 if malignant.item():
                     dataset_malignant.append(np.expand_dims(roi, -1))
                 else:
@@ -375,3 +408,153 @@ def preprocess_inbreast_for_ganterfactual(split='trainval') -> tensorflow.data.D
                                                     ))
     return tf_dataset
 
+
+
+class VindrDataset:
+    def __init__(self, data):
+        self.positive_data = data[data['label']==1]
+        self.positive_count = len(self.positive_data)
+        self.negative_data = data[data['label']==0]
+
+
+    def __len__(self):
+        return len(self.data)
+
+    def __iter__(self):
+        negative_sampled = self.negative_data.sample(n=self.positive_count)
+        self.data = pd.concat((negative_sampled, self.positive_data))
+        self.data = self.data.sample(frac=1)
+        for sample in self.data.values:
+            square = self.process_data(sample)
+            yield square, tensorflow.reshape(sample[1], [1])
+
+    @staticmethod
+    def process_data(sample):
+        image_path, label, scanner, center_lesion_x, center_lesion_y = sample
+
+        # Use pydicom to read the DICOM file from byte data
+        dicom = pydicom.dcmread(image_path)
+        
+        array = dicom.pixel_array
+        if scanner == 'Planmed Nuance':
+            array = (np.max(array) - array) / 4
+        
+        array = window_image(array, window_size=500)
+        if not np.isnan(center_lesion_x) and not np.isnan(center_lesion_y):
+            center_lesion_x = int(center_lesion_x)
+            center_lesion_y = int(center_lesion_y)
+            center = (center_lesion_x - 50 + np.random.randint(100), center_lesion_y - 50 + np.random.randint(100))
+            square = extract_square_from_center(array, center)
+        
+        else:
+            square = random_square_crop(ImageAndMuscle(array, None))[0]
+        square = tensorflow.reshape(square, [512, 512, 1])
+        square = tf_flip_square(square)
+        return square
+
+class VindrDatasetPretrain(VindrDataset):
+
+    def __len__(self):
+        return self.positive_count
+
+    def __iter__(self):
+        negative_sampled = self.negative_data.sample(n=self.positive_count)
+        self.positive_data = self.positive_data.sample(frac=1)
+        for sample_negative, sample_positive in zip(negative_sampled.values, self.positive_data.values):
+            negative_square = self.process_data(sample_negative)
+            positive_square = self.process_data(sample_positive)
+            yield negative_square,
+
+
+class VindrDatasetGanterfactual(VindrDataset):
+
+    def __len__(self):
+        return self.positive_count
+
+    def __iter__(self):
+        negative_sampled = self.negative_data.sample(n=self.positive_count)
+        self.positive_data = self.positive_data.sample(frac=1)
+        for sample_negative, sample_positive in zip(negative_sampled.values, self.positive_data.values):
+            negative_square = self.process_data(sample_negative)
+            positive_square = self.process_data(sample_positive)
+            yield negative_square, positive_square
+
+
+def vindr_findings(split='train'):
+    dotenv.load_dotenv()
+
+    args = vars(parse_args())
+    in_path = pathlib.Path(args['vindr'])
+    dicom_path = in_path / 'images'
+
+    findings = pd.read_csv(in_path / 'finding_annotations.csv')
+
+    findings['image_id'] = findings['image_id'].astype(str)
+    metadata = pd.read_csv(in_path / 'metadata.csv')
+    metadata = metadata[['SOP Instance UID', "Manufacturer's Model Name"]]
+    metadata = metadata.rename(columns={'SOP Instance UID': 'image_id'})
+    metadata['image_id'] = metadata['image_id'].astype(str)
+    findings = findings.merge(metadata, on='image_id')
+    findings['birad'] = findings['finding_birads'].fillna('2').apply(lambda x: int(x[-1]))
+    findings = findings[findings['birad'] > 1]
+    findings['label'] = findings['birad'].apply(lambda x: x > 3)
+    findings = findings[findings["Manufacturer's Model Name"].isin(('Planmed Nuance', 'Mammomat Inspiration'))]
+    findings['center_lesion_x'] = (findings['xmax'] + findings['xmin']) / 2
+    findings['center_lesion_x'] = findings['center_lesion_x'].apply(lambda x: x if np.isnan(x) else int(x))
+    findings['center_lesion_y'] = (findings['ymax'] + findings['ymin']) / 2
+    findings['center_lesion_y'] = findings['center_lesion_y'].apply(lambda x: x if np.isnan(x) else int(x))
+    findings['path'] = findings.apply(lambda row: dicom_path / row['study_id'] / (row['image_id'] + '.dicom'), axis=1)
+
+    if split == 'train':
+        findings = findings[findings['split']=='training']
+    elif split == 'val':
+        findings = findings[findings['split']=='test']
+    else:
+        assert split == 'trainval'
+    return findings
+
+def preprocess_vindr_for_classifier(split='trainval'):
+    findings = vindr_findings(split)
+
+    data_gen = VindrDataset(findings[['path', 'label', "Manufacturer's Model Name", 'center_lesion_x', 'center_lesion_y']])
+
+    dataset = tensorflow.data.Dataset.from_generator(lambda: data_gen,
+                                           output_signature=(
+                                               tensorflow.TensorSpec(shape=(512, 512, 1), dtype=np.float32),
+                                               tensorflow.TensorSpec(shape=(1,), dtype=bool)))
+    dataset = dataset.prefetch(tensorflow.data.experimental.AUTOTUNE)
+    return dataset
+
+
+
+
+def preprocess_vindr_for_pretraining(split='trainval'):
+    findings = vindr_findings(split)
+
+    #findings =  pd.DataFrame(np.repeat(findings.values[14:15], 32, axis=0), columns=findings.columns)
+    data_gen = VindrDatasetPretrain(findings[['path', 'label', "Manufacturer's Model Name", 'center_lesion_x', 'center_lesion_y']])
+    # for sample in data_gen:
+    #     continue
+
+    dataset = tensorflow.data.Dataset.from_generator(lambda: data_gen,
+                                           output_signature=(
+                                               tensorflow.TensorSpec(shape=(512, 512, 1), dtype=np.float32),
+                                           ))
+    dataset = dataset.prefetch(tensorflow.data.experimental.AUTOTUNE)
+    return dataset
+
+
+
+
+def preprocess_vindr_for_ganterfactual(split='trainval'):
+    findings = vindr_findings(split)
+
+    data_gen = VindrDatasetGanterfactual(findings[['path', 'label', "Manufacturer's Model Name", 'center_lesion_x', 'center_lesion_y']])
+
+    dataset = tensorflow.data.Dataset.from_generator(lambda: data_gen,
+                                           output_signature=(
+                                               tensorflow.TensorSpec(shape=(512, 512, 1), dtype=np.float32),
+                                               tensorflow.TensorSpec(shape=(512, 512, 1), dtype=np.float32),
+                                           ))
+    dataset = dataset.prefetch(tensorflow.data.experimental.AUTOTUNE)
+    return dataset

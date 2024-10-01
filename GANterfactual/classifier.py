@@ -102,6 +102,5 @@ def build_classifier(img_shape):
 
     # Output Layer
     model.add(Dense(2))
-    model.add(ReLU())
 
     return model

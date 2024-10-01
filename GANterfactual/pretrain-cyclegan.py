@@ -2,13 +2,16 @@ import datetime
 import os
 
 import numpy as np
-
+import tensorflow
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
 from keras.optimizers import Adam
+from tensorflow_addons.layers import InstanceNormalization
+
 from discriminator import build_discriminator
 from generator import build_generator
-from preprocessor import preprocess_inbreast_for_pretraining
+from GANterfactual.custom_layers import ForegroundLayerNormalization, ReflectionPadding2D
+from preprocessor import preprocess_inbreast_for_pretraining, preprocess_vindr_for_pretraining
 
 
 class PretrainGAN:
@@ -42,6 +45,19 @@ class PretrainGAN:
         self.g = build_generator(self.img_shape, self.gf, self.channels)
         self.build()
 
+    def load_pretrained(self, cyclegan_pretrained_folder):
+        custom_objects = {"ReflectionPadding2D": ReflectionPadding2D,
+                          'ForegroundLayerNormalization': ForegroundLayerNormalization}
+
+        # Load discriminators from disk
+        self.d = tensorflow.keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'discriminator_pretrained.h5'),
+                                           custom_objects=custom_objects, compile=False)
+
+
+        # Load generators from disk
+        self.g = tensorflow.keras.models.load_model(os.path.join(cyclegan_pretrained_folder, 'generator_pretrained.h5'),
+                                            custom_objects=custom_objects, compile=False)
+
 
     def save(self, cyclegan_folder):
         os.makedirs(cyclegan_folder, exist_ok=True)
@@ -53,14 +69,12 @@ class PretrainGAN:
         self.g.save(os.path.join(cyclegan_folder, 'generator_pretrained.h5'))
 
     def build(self):
-        optimizer = Adam(0.0002, 0.5)
-
+        optimizer = Adam(0.0002)
+        self.d.trainable = True
         self.d.compile(loss='mse', optimizer=optimizer, metrics=['accuracy'])
-
 
         # Input images from both domains
         img = Input(shape=self.img_shape)
-
         img_id = self.g(img)
 
         self.d.trainable = False
@@ -73,7 +87,7 @@ class PretrainGAN:
                               outputs=[valid, img_id])
 
         self.combined.compile(loss=['mse', 'mae'],
-                              loss_weights=[1, 10],
+                              loss_weights=[1, 100],
                               optimizer=optimizer)
 
     def train(self, my_dataset, epochs, batch_size=1, print_interval=100):
@@ -131,10 +145,33 @@ class PretrainGAN:
 
 
 if __name__ == '__main__':
-    dataset = preprocess_inbreast_for_pretraining('trainval')
     gan = PretrainGAN()
     gan.construct()
-
+    dataset = preprocess_vindr_for_pretraining('trainval')
+    #
+    #
+    # pretrained_folder = os.path.join('..', 'models', 'GAN', 'ep_105')
+    # gan.load_pretrained(pretrained_folder)
+    # dataset = preprocess_inbreast_for_pretraining('val')
+    # iter_dataset = iter(dataset)
+    # first_sample = next(iter_dataset)
+    # second_sample = next(iter_dataset)
+    # import matplotlib.pyplot as plt
+    # import numpy as np
+    # plt.figure()
+    # plt.imshow(first_sample[0], vmin=0, vmax=1, cmap='gray')
+    # plt.figure()
+    # first_recon = gan.g(first_sample[0][np.newaxis, ...])[0]
+    # plt.imshow(first_recon, vmin=0, vmax=1, cmap='gray')
+    # plt.figure()
+    # plt.imshow(second_sample[0], vmin=0, vmax=1, cmap='gray')
+    # plt.figure()
+    # second_recon = gan.g(second_sample[0][np.newaxis, ...])[0]
+    # plt.imshow(second_recon, vmin=0, vmax=1, cmap='gray')
+    # plt.show()
+    # print()
+    #
+    #
     gan.train(my_dataset=dataset, epochs=1000, batch_size=16, print_interval=10)
-    #gan.save(os.path.join('..', 'models', 'GAN'))
+    gan.save(os.path.join('..', 'models', 'GAN'))
 
