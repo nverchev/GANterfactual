@@ -5,8 +5,10 @@ import keras
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow
+from keras.saving.save import load_model
 
 from skimage.transform import resize
+from sympy.stats.rv import probability
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
 from tensorflow.keras.preprocessing import image
@@ -15,7 +17,6 @@ from tensorflow_addons.layers import InstanceNormalization
 from custom_layers import ForegroundLayerNormalization, ReflectionPadding2D
 
 from GANterfactual.preprocessor import preprocess_inbreast_for_ganterfactual, preprocess_vindr_for_ganterfactual
-from train_classifier import load_classifier
 from discriminator import build_discriminator
 from generator import build_generator
 
@@ -84,7 +85,8 @@ class CycleGAN:
         self.build_combined(classifier_path, classifier_weight)
 
     def load_existing(self, cyclegan_folder, classifier_path=None, classifier_weight=None):
-        custom_objects = {"InstanceNormalization": InstanceNormalization, }
+        custom_objects = {"ForegroundLayerNormalization": ForegroundLayerNormalization,
+                          "ReflectionPadding2D":  ReflectionPadding2D }
 
         # Load discriminators from disk
         self.d_N = keras.models.load_model(os.path.join(cyclegan_folder, 'discriminator_n.tf'),
@@ -148,7 +150,7 @@ class CycleGAN:
         valid_P = self.d_P(fake_P)
 
         if classifier_path is not None and os.path.isfile(classifier_path):
-            self.classifier = load_classifier(classifier_path, self.img_shape)
+            self.classifier = load_model(classifier_path)
             self.classifier._name = "classifier"
             self.classifier.trainable = False
 
@@ -163,7 +165,7 @@ class CycleGAN:
                                            img_N_id, img_P_id])
 
             self.combined.compile(loss=['mse', 'mse',
-                                        'mse', 'mse',
+                                        'binary_crossentropy', 'binary_crossentropy',
                                         'mae', 'mae',
                                         'mae', 'mae'],
                                   loss_weights=[1, 1,
@@ -197,8 +199,8 @@ class CycleGAN:
         valid = np.ones((batch_size,) + self.disc_patch)
         fake = np.zeros((batch_size,) + self.disc_patch)
 
-        class_N = np.stack([np.ones(batch_size), np.zeros(batch_size)]).T
-        class_P = np.stack([np.zeros(batch_size), np.ones(batch_size)]).T
+        class_N = np.stack([np.zeros(batch_size)])
+        class_P = np.stack([np.ones(batch_size)])
 
         for epoch in range(epochs):
             for batch_i, (imgs_N, imgs_P) in enumerate(dataset):
@@ -296,41 +298,22 @@ class CycleGAN:
         fig.savefig("images/%d_%d.png" % (epoch, batch_i))
         plt.close()
 
-    def predict(self, dataset, batch_size):
+    def predict(self, image, positive_sample=True):
         assert (self.classifier is not None)
-        dataset = dataset.batch(batch_size)
-        class_neg, class_pos, fake_P, fake_N, class_fake_P, class_fake_N = [], [], [], [], [], []
-        for batch_i, (imgs_N, imgs_P) in enumerate(dataset):
-            # ----------------------
-            #  Train Discriminators
-            # ----------------------
-            batch_class_neg = self.classifier.predict(imgs_N)
-            batch_class_pos = self.classifier.predict(imgs_P)
-
-            # Translate images to opposite domain
-            batch_fake_P = self.g_NP.predict(imgs_N)
-            batch_fake_N = self.g_PN.predict(imgs_P)
-
-            batch_class_fake_P = self.classifier.predict(batch_fake_P)
-            batch_class_fake_N = self.classifier.predict(batch_fake_N)
-
-            class_neg.append(batch_class_neg)
-            class_pos.append(batch_class_pos)
-            fake_P.append(batch_fake_P)
-            fake_N.append(batch_fake_N)
-            class_fake_P.append(batch_class_fake_P)
-            class_fake_N.append(batch_class_fake_N)
-
-        return class_neg, class_pos, fake_P, fake_N, class_fake_P, class_fake_N
+        image = tensorflow.expand_dims(image, 0)
+        class_prob = self.classifier.predict(image)
+        fake = self.g_PN.predict(image) if positive_sample else self.g_NP.predict(image)
+        fake_class_prob = self.classifier.predict(fake)
+        return class_prob, fake, fake_class_prob
 
 
 
 
 
 if __name__ == '__main__':
-    dataset = preprocess_vindr_for_ganterfactual('train')
+    dataset = preprocess_inbreast_for_ganterfactual('train')
     gan = CycleGAN()
-    classifier_path = os.path.join('..', 'models', 'classifier_final', 'model_100.h5')
+    classifier_path = os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5')
     gan.construct(classifier_path=classifier_path, classifier_weight=0.05)
     gan.train(dataset=dataset, epochs=100, batch_size=1, print_interval=10,
           sample_interval=100)

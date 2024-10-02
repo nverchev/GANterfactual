@@ -1,35 +1,23 @@
-import typing
 import random
-import warnings
-import io
 import numpy as np
 import tensorflow
 import pydicom
 import pandas as pd
 import os
-import argparse
 import dotenv
 import pathlib
 import xml.etree.ElementTree as ET
-import cv2
 from tensorflow.python.framework import dtypes
-from tensorflow.python.ops.numpy_ops import array
 
 
-def parse_args() -> argparse.Namespace:
+def load_env() -> tuple[str, str]:
+    dotenv.load_dotenv()
     try:
         inbreast_path = os.getenv('INBREAST_PATH')
         vindr_path = os.getenv('VINDR_PATH')
     except TypeError:
         raise FileNotFoundError('File .env does not exists or it does not contain the path')
-    ap = argparse.ArgumentParser()
-    ap.add_argument('-inbreast', '--inbreast', default=inbreast_path, help='input folder')
-    ap.add_argument('-vindr', '--vindr', default=vindr_path, help='input folder')
-    #ap.add_argument('-o', '--out', required=True, help='output folder')
-    ap.add_argument('-t', '--test',  default=20, help='proportion of images used for test')
-    ap.add_argument('-v', '--validation', default=10, help='proportion of images used for validation')
-    ap.add_argument('-d', '--dimension', default=512, help='new dimension for files')
-    return ap.parse_args()
+    return inbreast_path, vindr_path
 
 def shuffled_patients_paths(dicom_paths):
     random.seed(123)
@@ -57,25 +45,6 @@ def window_image(array, window_size=500):
     array = np.clip(array, a_min=new_min, a_max=new_max) * (array > 0)
     array /= new_max
     return array
-
-def create_mask_from_polygon(image_shape, polygon_coords):
-    """
-    Create a mask from a polygon defined by a list of coordinates.
-
-    :param image_shape: Tuple defining the shape of the mask (height, width).
-    :param polygon_coords: List of (x, y) tuples representing the vertices of the polygon.
-    :return: A binary mask with the polygon filled.
-    """
-    # Create an empty mask with the given shape
-    mask = np.zeros(image_shape, dtype=np.uint8)
-
-    # Convert the polygon coordinates to the correct format for OpenCV
-    polygon = np.array(polygon_coords, dtype=np.int32)
-
-    # Fill the polygon on the mask
-    cv2.fillPoly(mask, [polygon], 1)
-
-    return mask
 
 
 def parse_dict(d):
@@ -121,27 +90,12 @@ def extract_muscle_rois(xml_path: pathlib.Path) -> list[np.ndarray]:
     return [np.array(points) for points in muscle_roi]
 
 
-
-
 def read_image(dcm_path: pathlib.Path, window_size=500) -> np.ndarray:
     image = pydicom.dcmread(dcm_path).pixel_array
     # Normalize the image
     image = window_image(image, window_size=700)
     return image
 
-class ImageAndMuscle(typing.NamedTuple):
-    image: np.ndarray
-    muscle_mask: typing.Optional[np.ndarray]
-
-
-def extract_muscle_mask(image: np.ndarray, muscle_path: pathlib.Path) -> typing.Optional[np.ndarray]:
-    if muscle_path.exists():
-        muscle_roi = extract_muscle_rois(muscle_path)
-        corner = (0, 0) if muscle_roi[0][0] < image.shape[0] / 2 else (image.shape[0], 0)
-        muscle_roi.append(np.array(corner))
-        return create_mask_from_polygon(image.shape, muscle_roi)
-    else:
-        return None
 
 def extract_square_from_center(image: np.ndarray, center: tuple[int, int], size=512):
     # Image dimensions
@@ -168,15 +122,15 @@ def extract_square_from_center(image: np.ndarray, center: tuple[int, int], size=
     return image[top:bottom, left:right]
 
 
-def extract_squares_inbreast(image: np.ndarray, xml_path: pathlib.Path, size=512) -> list[np.ndarray]:
+def extract_squares_inbreast(image: np.ndarray, xml_path: pathlib.Path, size=512) -> list[tuple[np.ndarray, float, float]]:
 
     if xml_path.exists():
         rois = extract_rois(xml_path)
-        squares = []
+        square_and_center = []
         for roi in rois:
             center = np.mean(roi, axis=0).astype(np.int32)
-            squares.append(extract_square_from_center(image, center, size))
-        return squares
+            square_and_center.append((extract_square_from_center(image, center, size), center[0], center[1]))
+        return square_and_center
     else:
         return []
 
@@ -192,9 +146,9 @@ def tf_flip_square(image, label=None):
     else:
         return image, label
 
-def random_square_crop(data_point: ImageAndMuscle,
+def random_square_crop(image,
                        square_size=512,
-                       max_black_pixel_ratio=0.3) -> tuple[np.ndarray]:
+                       max_black_pixel_ratio=0.3) -> tuple[np.ndarray, float, float]:
     """
     Randomly crops a square from the image and checks if it's mostly black.
 
@@ -206,8 +160,6 @@ def random_square_crop(data_point: ImageAndMuscle,
     Returns:
     - cropped square (tf.Tensor) or None if it’s mostly black.
     """
-    image = data_point.image
-    muscle_mask = data_point.muscle_mask
     height, width = image.shape[:2]
     total_pixels = square_size ** 2
     left_side = np.count_nonzero(image[:, :width  // 2]) > np.count_nonzero(image[:, width  // 2:])
@@ -220,24 +172,24 @@ def random_square_crop(data_point: ImageAndMuscle,
             y = np.random.randint(width // 2 - square_size, width - square_size)
         x = np.random.randint(square_size, height - 2 * square_size)
 
-        # Remove muscle:
-        image_no_muscle = (1 - muscle_mask) * image if muscle_mask is not None else image
 
         # Crop the square
-        square = image_no_muscle[x:x + square_size, y:y + square_size]
+        square = image[x:x + square_size, y:y + square_size]
 
         # Calculate the ratio of non-black pixels
         non_black_pixels = np.count_nonzero(square)
 
         if non_black_pixels > (1 - max_black_pixel_ratio) * total_pixels:
-            square = image[x:x + square_size, y:y + square_size]
-            return np.expand_dims(square, axis=-1),
-    x_up = height // 2 - square_size // 2
+            return np.expand_dims(square, axis=-1), x, y
+
+    x = height // 2 - square_size // 2
     if left_side:
-        square = image[x_up:x_up + square_size, :square_size]
+        y = 0
+        square = image[x:x + square_size, :square_size]
     else:
-        square = image[x_up:x_up + square_size, width - square_size:]
-    return np.expand_dims(square, axis=-1),
+        y = width - square_size
+        square = image[x:x + square_size, width - square_size:]
+    return np.expand_dims(square, axis=-1), x, y
 
 
 
@@ -251,72 +203,22 @@ class ShuffledDataset:
         for item in self.data_list:
             yield item
 
-def preprocess_inbreast_for_pretraining(split='trainval') -> tensorflow.data.Dataset:
-    dotenv.load_dotenv()
 
-    args = vars(parse_args())
-    in_path = pathlib.Path(args['inbreast'])
-    test_size = float(args['test'])
-    val_size = float(args['validation'])
-    dim = int(args['dimension'])
-
-    dicom_path = in_path / 'AllDICOMs'
-    muscle_path = in_path / 'PectoralMuscle' / 'Pectoral Muscle XML'
-
-    dcm_files = list(dicom_path.iterdir())
-    patient_paths = shuffled_patients_paths(dcm_files)
-
-
-    len_ds = len(patient_paths)
-    val_split = int(len_ds * (100 - val_size - test_size) / 100 )
-    test_split = int(len_ds * (100 - test_size) / 100 )
-    if split == 'train':
-        indices = slice(0, val_split)
-    elif split == 'trainval':
-        indices = slice(0, test_split)
-    elif split == 'val':
-        indices = slice(val_split, test_split)
-    else:
-        assert split == 'test'
-        indices = slice(test_split, None)
-
-    dataset: list[ImageAndMuscle] = []
-    for patient in list(patient_paths)[indices]:
-        for image_file in patient_paths[patient]:
-            if image_file.suffix == '.m':
-                continue
-            id_str = image_file.name.split('_')[0]
-            muscle_file = (muscle_path / (id_str + '_muscle')).with_suffix('.xml')
-
-            image = read_image(image_file)
-            roi = None #extract_roi(xml_file)
-            muscle_mask = extract_muscle_mask(image, muscle_file)
-            dataset.append(ImageAndMuscle(image, muscle_mask))
-
-    tf_dataset =  tensorflow.data.Dataset.from_generator(lambda: map(random_square_crop, ShuffledDataset(dataset)),
-                                                        output_signature=(
-                                                        tensorflow.TensorSpec(shape=(dim, dim, 1), dtype=np.float32),
-                                                    ))
-    return tf_dataset
-
-
-def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Dataset:
-    dotenv.load_dotenv()
-
-    args = vars(parse_args())
-    in_path = pathlib.Path(args['inbreast'])
-    test_size = float(args['test'])
-    val_size = float(args['validation'])
-    dim = int(args['dimension'])
+def inbreast_findings(split):
+    inbreast_path, _ = load_env()
+    in_path = pathlib.Path(inbreast_path)
+    test_size = 20
+    val_size = 10
+    dim = 512
 
     xls_sheet = pd.read_excel(in_path / 'INbreast.xls', sheet_name="Sheet1", dtype=str)[:-2]
     xls_sheet['malignant'] = xls_sheet['Bi-Rads'].apply(lambda x: int(x[0]) > 3)
     xml_path = in_path / 'AllXML'
     dicom_path = in_path / 'AllDICOMs'
-
     dcm_files = list(dicom_path.iterdir())
-    patient_paths = shuffled_patients_paths(dcm_files)
 
+
+    patient_paths = shuffled_patients_paths(dcm_files)
 
     len_ds = len(patient_paths)
     val_split = int(len_ds * (100 - val_size - test_size) / 100 )
@@ -333,72 +235,45 @@ def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Data
         assert split == 'all'
         indices = slice(None, None)
 
-    dataset: list[tuple[np.ndarray, bool]] = []
+    findings_list = []
     for patient in list(patient_paths)[indices]:
         for image_file in patient_paths[patient]:
             id_str = image_file.name.split('_')[0]
             xml_file = (xml_path / id_str).with_suffix('.xml')
             malignant = xls_sheet[xls_sheet['File Name'] == id_str]['malignant']
-            label = tensorflow.keras.utils.to_categorical(malignant, num_classes=2)[0]
-            image = read_image(image_file)
-            for roi in extract_squares_inbreast(image, xml_file):
-                dataset.append((np.expand_dims(roi, -1), label))
+            findings_list.append((image_file, malignant, xml_file))
+
+    return pd.DataFrame(findings_list, columns=['image_file', 'malignant', 'xml_file'])
+
+
+
+def preprocess_inbreast_for_classifier(split='trainval') -> tensorflow.data.Dataset:
+    dim = 512
+    findings = inbreast_findings(split)
+    dataset= []
+    for image_file, malignant, xml_file in findings.values:
+        image = read_image(image_file)
+        for roi, _, _ in extract_squares_inbreast(image, xml_file):
+            dataset.append((np.expand_dims(roi, -1), malignant))
 
     tf_dataset =  tensorflow.data.Dataset.from_generator(lambda: ShuffledDataset(dataset),
                                                         output_signature=(
                                                         tensorflow.TensorSpec(shape=(dim, dim, 1), dtype=np.float32),
-                                                        tensorflow.TensorSpec(shape=(2, ), dtype=bool)
+                                                        tensorflow.TensorSpec(shape=(1, ), dtype=bool)
                                                     ))
     return tf_dataset.map(tf_flip_square)
-
-
 def preprocess_inbreast_for_ganterfactual(split='trainval') -> tensorflow.data.Dataset:
-    dotenv.load_dotenv()
-
-    args = vars(parse_args())
-    in_path = pathlib.Path(args['inbreast'])
-    test_size = float(args['test'])
-    val_size = float(args['validation'])
-    dim = int(args['dimension'])
-
-    xls_sheet = pd.read_excel(in_path / 'INbreast.xls', sheet_name="Sheet1", dtype=str)[:-2]
-    xls_sheet['malignant'] = xls_sheet['Bi-Rads'].apply(lambda x: int(x[0]) > 3)
-    xml_path = in_path / 'AllXML'
-    dicom_path = in_path / 'AllDICOMs'
-    dcm_files = list(dicom_path.iterdir())
-    patient_paths = shuffled_patients_paths(dcm_files)
-
-
-    len_ds = len(patient_paths)
-    val_split = int(len_ds * (100 - val_size - test_size) / 100 )
-    test_split = int(len_ds * (100 - test_size) / 100 )
-    if split == 'train':
-        indices = slice(0, val_split)
-    elif split == 'trainval':
-        indices = slice(0, test_split)
-    elif split == 'val':
-        indices = slice(val_split, test_split)
-    elif split == 'test':
-        indices = slice(test_split, None)
-    else:
-        assert split == 'all'
-        indices = slice(None, None)
-
+    dim=512
+    findings = inbreast_findings(split)
     dataset_malignant: list[np.ndarray] = []
     dataset_benign: list[np.ndarray] = []
-    for patient in list(patient_paths)[indices]:
-        for image_file in patient_paths[patient]:
-            if image_file.suffix == '.m':
-                continue
-            id_str = image_file.name.split('_')[0]
-            xml_file = (xml_path / id_str).with_suffix('.xml')
-            malignant = xls_sheet[xls_sheet['File Name'] == id_str]['malignant']
-            image = read_image(image_file)
-            for roi in extract_squares_inbreast(image, xml_file):
-                if malignant.item():
-                    dataset_malignant.append(np.expand_dims(roi, -1))
-                else:
-                    dataset_benign.append(np.expand_dims(roi, -1))
+    for image_file, malignant, xml_file in findings.values:
+        image = read_image(image_file)
+        for roi, _, _  in extract_squares_inbreast(image, xml_file):
+            if malignant.item():
+                dataset_malignant.append(np.expand_dims(roi, -1))
+            else:
+                dataset_benign.append(np.expand_dims(roi, -1))
 
     tf_dataset =  tensorflow.data.Dataset.from_generator(lambda: zip(ShuffledDataset(dataset_benign),
                                                                      ShuffledDataset(dataset_malignant)),
@@ -447,7 +322,7 @@ class VindrDataset:
             square = extract_square_from_center(array, center)
         
         else:
-            square = random_square_crop(ImageAndMuscle(array, None))[0]
+            square = random_square_crop(array)[0]
         square = tensorflow.reshape(square, [512, 512, 1])
         square = tf_flip_square(square)
         return square
@@ -481,10 +356,8 @@ class VindrDatasetGanterfactual(VindrDataset):
 
 
 def vindr_findings(split='train'):
-    dotenv.load_dotenv()
-
-    args = vars(parse_args())
-    in_path = pathlib.Path(args['vindr'])
+    _, vindr_path = load_env()
+    in_path = pathlib.Path(vindr_path)
     dicom_path = in_path / 'images'
 
     findings = pd.read_csv(in_path / 'finding_annotations.csv')
@@ -530,11 +403,7 @@ def preprocess_vindr_for_classifier(split='trainval'):
 
 def preprocess_vindr_for_pretraining(split='trainval'):
     findings = vindr_findings(split)
-
-    #findings =  pd.DataFrame(np.repeat(findings.values[14:15], 32, axis=0), columns=findings.columns)
     data_gen = VindrDatasetPretrain(findings[['path', 'label', "Manufacturer's Model Name", 'center_lesion_x', 'center_lesion_y']])
-    # for sample in data_gen:
-    #     continue
 
     dataset = tensorflow.data.Dataset.from_generator(lambda: data_gen,
                                            output_signature=(
