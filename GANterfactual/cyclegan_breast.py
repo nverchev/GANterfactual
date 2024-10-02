@@ -7,11 +7,8 @@ import numpy as np
 import tensorflow
 from keras.saving.save import load_model
 
-from skimage.transform import resize
-from sympy.stats.rv import probability
 from tensorflow.keras.layers import Input
 from tensorflow.keras.models import Model
-from tensorflow.keras.preprocessing import image
 from keras.optimizers import Adam
 from tensorflow_addons.layers import InstanceNormalization
 from custom_layers import ForegroundLayerNormalization, ReflectionPadding2D
@@ -169,7 +166,7 @@ class CycleGAN:
                                         'mae', 'mae',
                                         'mae', 'mae'],
                                   loss_weights=[1, 1,
-                                                0.05, .05,
+                                                classifier_weight, classifier_weight,
                                                 self.lambda_cycle, self.lambda_cycle,
                                                 self.lambda_id, self.lambda_id],
                                   optimizer=optimizer_g)
@@ -300,7 +297,6 @@ class CycleGAN:
 
     def predict(self, image, positive_sample=True):
         assert (self.classifier is not None)
-        image = tensorflow.expand_dims(image, 0)
         class_prob = self.classifier.predict(image)
         fake = self.g_PN.predict(image) if positive_sample else self.g_NP.predict(image)
         fake_class_prob = self.classifier.predict(fake)
@@ -313,9 +309,9 @@ class CycleGAN:
 if __name__ == '__main__':
     dataset = preprocess_inbreast_for_ganterfactual('train')
     gan = CycleGAN()
-    classifier_path = os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5')
+    classifier_path = os.path.join('..', 'models', 'classifier_inbreast', 'model_200.h5')
     gan.construct(classifier_path=classifier_path, classifier_weight=0.05)
-    gan.train(dataset=dataset, epochs=100, batch_size=1, print_interval=10,
+    gan.train(dataset=dataset, epochs=30, batch_size=1, print_interval=10,
           sample_interval=100)
-    gan.save(os.path.join('..', 'models', 'GANterfactual'))
+    gan.save(os.path.join('..', 'models', 'GANterfactual_inbreast'))
 

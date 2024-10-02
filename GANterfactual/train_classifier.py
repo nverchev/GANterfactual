@@ -38,7 +38,7 @@ def build_classifier():
     # Create the final model
     model = models.Model(inputs=input_layer, outputs=output_layer)
 
-    opt = optimizers.Adam(0.001)
+    opt = optimizers.Adam(0.0001)
     model.compile(loss='binary_crossentropy',
                   metrics=['accuracy', metrics.Precision(), metrics.Recall()],
                   optimizer=opt)
@@ -49,19 +49,19 @@ def build_classifier():
 if __name__ == "__main__":
     model = build_classifier()
     model.summary()
-    #
-    #
-    # dataset= preprocess_inbreast_for_classifier('trainval')
-    # dataset = dataset.batch(64)
-    # for mul in range(10):
-    #     model.fit(dataset,
-    #               epochs=10,
-    #               callbacks=[callbacks.TensorBoard(log_dir="log")])
-    #     model.save(os.path.join('..', 'models', 'classifier_vindr', f'model_{(mul + 1) * 10}.h5'), include_optimizer=True)
-    # del dataset
-    # gc.collect() # free up some memory
+
+
+    dataset= preprocess_inbreast_for_classifier('train')
+    dataset = dataset.batch(64)
+    for mul in range(20):
+        model.fit(dataset,
+                  epochs=10,
+                  callbacks=[callbacks.TensorBoard(log_dir="log")])
+        model.save(os.path.join('..', 'models', 'classifier_inbreast', f'model_{(mul + 1) * 10}.h5'), include_optimizer=True)
+    del dataset
+    gc.collect() # free up some memory
 
 
     test_dataset = preprocess_inbreast_for_classifier('test')
-    model.load_weights(os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5'))
+    #model = load_model(os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5'))
     model.evaluate(test_dataset.batch(32))

@@ -327,19 +327,6 @@ class VindrDataset:
         square = tf_flip_square(square)
         return square
 
-class VindrDatasetPretrain(VindrDataset):
-
-    def __len__(self):
-        return self.positive_count
-
-    def __iter__(self):
-        negative_sampled = self.negative_data.sample(n=self.positive_count)
-        self.positive_data = self.positive_data.sample(frac=1)
-        for sample_negative, sample_positive in zip(negative_sampled.values, self.positive_data.values):
-            negative_square = self.process_data(sample_negative)
-            positive_square = self.process_data(sample_positive)
-            yield negative_square,
-
 
 class VindrDatasetGanterfactual(VindrDataset):
 
@@ -397,22 +384,6 @@ def preprocess_vindr_for_classifier(split='trainval'):
                                                tensorflow.TensorSpec(shape=(1,), dtype=bool)))
     dataset = dataset.prefetch(tensorflow.data.experimental.AUTOTUNE)
     return dataset
-
-
-
-
-def preprocess_vindr_for_pretraining(split='trainval'):
-    findings = vindr_findings(split)
-    data_gen = VindrDatasetPretrain(findings[['path', 'label', "Manufacturer's Model Name", 'center_lesion_x', 'center_lesion_y']])
-
-    dataset = tensorflow.data.Dataset.from_generator(lambda: data_gen,
-                                           output_signature=(
-                                               tensorflow.TensorSpec(shape=(512, 512, 1), dtype=np.float32),
-                                           ))
-    dataset = dataset.prefetch(tensorflow.data.experimental.AUTOTUNE)
-    return dataset
-
-
 
 
 def preprocess_vindr_for_ganterfactual(split='trainval'):
