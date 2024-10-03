@@ -295,10 +295,10 @@ class CycleGAN:
         fig.savefig("images/%d_%d.png" % (epoch, batch_i))
         plt.close()
 
-    def predict(self, image, positive_sample=True):
+    def predict(self, image, malignant_target=True):
         assert (self.classifier is not None)
         class_prob = self.classifier.predict(image)
-        fake = self.g_PN.predict(image) if positive_sample else self.g_NP.predict(image)
+        fake = self.g_NP.predict(image) if malignant_target else self.g_PN.predict(image)
         fake_class_prob = self.classifier.predict(fake)
         return class_prob, fake, fake_class_prob
 
@@ -307,10 +307,10 @@ class CycleGAN:
 
 
 if __name__ == '__main__':
-    dataset = preprocess_inbreast_for_ganterfactual('train')
+    dataset = preprocess_inbreast_for_ganterfactual('trainval')
     gan = CycleGAN()
     classifier_path = os.path.join('..', 'models', 'classifier_inbreast', 'model_200.h5')
-    gan.construct(classifier_path=classifier_path, classifier_weight=0.05)
+    gan.construct(classifier_path=classifier_path, classifier_weight=0.01)
     gan.train(dataset=dataset, epochs=30, batch_size=1, print_interval=10,
           sample_interval=100)
     gan.save(os.path.join('..', 'models', 'GANterfactual_inbreast'))

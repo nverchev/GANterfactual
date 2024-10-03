@@ -357,7 +357,7 @@ def vindr_findings(split='train'):
     findings = findings.merge(metadata, on='image_id')
     findings['birad'] = findings['finding_birads'].fillna('2').apply(lambda x: int(x[-1]))
     findings = findings[findings['birad'] > 1]
-    findings['label'] = findings['birad'].apply(lambda x: x > 3)
+    findings['label'] = findings['birad'].apply(lambda x: x >= 3)
     findings = findings[findings["Manufacturer's Model Name"].isin(('Planmed Nuance', 'Mammomat Inspiration'))]
     findings['center_lesion_x'] = (findings['xmax'] + findings['xmin']) / 2
     findings['center_lesion_x'] = findings['center_lesion_x'].apply(lambda x: x if np.isnan(x) else int(x))

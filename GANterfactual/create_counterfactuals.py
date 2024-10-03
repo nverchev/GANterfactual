@@ -99,8 +99,8 @@ def plot_original(array, center_lesion_x, center_lesion_y, square, id_str, folde
 
 def batch_process_vindr(batch_size=64):
     gan = CycleGAN()
-    classifier_path = os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5')
-    ganterfactual_folder = os.path.join('..', 'models', 'GANterfactual', 'ep_49')
+    classifier_path = os.path.join('..', 'models', 'classifier_vindr', 'model_200.h5')
+    ganterfactual_folder = os.path.join('..', 'models', 'GANterfactual_vindr')
     gan.load_existing(ganterfactual_folder, classifier_path=classifier_path)
 
     findings = vindr_findings('val')
@@ -139,7 +139,7 @@ def batch_process_vindr(batch_size=64):
     prob_df = pd.DataFrame(probs_list, columns=['malignant', 'prob', 'fake_class_prob'])
     prob_df.to_csv('probs_vindr.csv')
 
-def batch_process_inbreast(batch_size=64):
+def batch_process_inbreast(malignant_target=True, batch_size=64):
     gan = CycleGAN()
     classifier_path = os.path.join('..', 'models', 'classifier_inbreast', 'model_200.h5')
     ganterfactual_folder = os.path.join('..', 'models', 'GANterfactual_inbreast')
@@ -150,7 +150,7 @@ def batch_process_inbreast(batch_size=64):
 
     findings = inbreast_findings(split='test')
 
-    for i, (image_file, malignant, xml_file) in enumerate(findings.values):
+    for i, (image_file, malignant, xml_file) in enumerate(findings.values[:76]):
         image = read_image(image_file)
         for roi, center_lesion_x, center_lesion_y in extract_squares_inbreast(image, xml_file):
             batch_data.append((image, roi, center_lesion_x, center_lesion_y, malignant.item(), i))
@@ -158,32 +158,32 @@ def batch_process_inbreast(batch_size=64):
             # If we've accumulated a batch of 64 samples, process them
             if len(batch_data) == batch_size:
                 rois = np.stack([data[1] for data in batch_data])
-                probs, fakes, fake_probs = gan.predict(rois)  # Predict batch
+                probs, fakes, fake_probs = gan.predict(rois, malignant_target=malignant_target)  # Predict batch
 
                 for j, (image, roi, center_lesion_x, center_lesion_y, malignant_bool, idx) in enumerate(batch_data):
                     plot_original(image, center_lesion_x, center_lesion_y, roi, id_str=f'{idx}_{j}', folder='inbreast')
                     plot_counterfactual(image, center_lesion_x, center_lesion_y, roi, fakes[j], id_str=f'{idx}_{j}', folder='inbreast')
-                    probs_list.append((malignant_bool, probs[j][0], fake_probs[j][0]))
+                    probs_list.append((idx, j, malignant_bool, probs[j][0], fake_probs[j][0]))
 
                 batch_data.clear()  # Clear batch after processing
 
     # Process the remaining samples (if the total isn't a multiple of batch_size)
-    if batch_data:
-        rois = np.stack([data[1] for data in batch_data])
-        probs, fakes, fake_probs = gan.predict(rois)  # Predict the remaining batch
-
-        for j, (image, roi, center_lesion_x, center_lesion_y, malignant, idx) in enumerate(batch_data):
-            plot_original(image, center_lesion_x, center_lesion_y, roi, id_str=f'{idx}_{j}', folder='inbreast')
-            plot_counterfactual(image, center_lesion_x, center_lesion_y, roi, fakes[j], id_str=f'{idx}_{j}', folder='inbreast')
-            probs_list.append((malignant, probs[j][0], fake_probs[j][0]))
+    # if batch_data:
+    #     rois = np.stack([data[1] for data in batch_data])
+    #     probs, fakes, fake_probs = gan.predict(rois, malignant_target=malignant_target)  # Predict the remaining batch
+    #
+    #     for j, (image, roi, center_lesion_x, center_lesion_y, malignant, idx) in enumerate(batch_data):
+    #         plot_original(image, center_lesion_x, center_lesion_y, roi, id_str=f'{idx}_{j}', folder='inbreast')
+    #         plot_counterfactual(image, center_lesion_x, center_lesion_y, roi, fakes[j], id_str=f'{idx}_{j}', folder='inbreast')
+    #         probs_list.append((idx, j, malignant, probs[j][0], fake_probs[j][0]))
 
     # Save the probabilities to CSV
-    prob_df = pd.DataFrame(probs_list, columns=['malignant', 'prob', 'fake_class_prob'])
+    prob_df = pd.DataFrame(probs_list, columns=['image_id','batch_index','malignant', 'prob', 'fake_class_prob'])
     prob_df.to_csv('probs_inbreast.csv')
 
 
 if __name__ == '__main__':
-    batch_process_inbreast()
+    batch_process_inbreast(malignant_target=True)
 
 
 

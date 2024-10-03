@@ -29,9 +29,9 @@ def build_classifier():
 
     # Add global pooling and the final classification head or other output layers you need
     x = layers.GlobalMaxPooling2D()(x)
-    x = layers.Dropout(.3)(x)
+    x = layers.Dropout(.4)(x)
     x = layers.Dense(512, activation='relu')(x)
-    x = layers.Dropout(.3)(x)
+    x = layers.Dropout(.4)(x)
     x = layers.Dense(64, activation='relu')(x)
     output_layer = layers.Dense(1, activation='sigmoid')(x)
 
@@ -40,7 +40,7 @@ def build_classifier():
 
     opt = optimizers.Adam(0.0001)
     model.compile(loss='binary_crossentropy',
-                  metrics=['accuracy', metrics.Precision(), metrics.Recall()],
+                  metrics=['accuracy', metrics.Recall(), metrics.Precision(), metrics.AUC(), metrics.Se],
                   optimizer=opt)
 
     return model
@@ -51,17 +51,17 @@ if __name__ == "__main__":
     model.summary()
 
 
-    dataset= preprocess_inbreast_for_classifier('train')
+    dataset= preprocess_vindr_for_classifier('train')
     dataset = dataset.batch(64)
     for mul in range(20):
         model.fit(dataset,
                   epochs=10,
                   callbacks=[callbacks.TensorBoard(log_dir="log")])
-        model.save(os.path.join('..', 'models', 'classifier_inbreast', f'model_{(mul + 1) * 10}.h5'), include_optimizer=True)
+        model.save(os.path.join('..', 'models', 'classifier_vindr', f'model_{(mul + 1) * 10}.h5'), include_optimizer=True)
     del dataset
     gc.collect() # free up some memory
 
 
-    test_dataset = preprocess_inbreast_for_classifier('test')
+    test_dataset = preprocess_vindr_for_classifier('val')
     #model = load_model(os.path.join('..', 'models', 'classifier_vindr', 'model_100.h5'))
     model.evaluate(test_dataset.batch(32))
